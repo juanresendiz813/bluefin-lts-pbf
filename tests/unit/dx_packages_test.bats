@@ -94,11 +94,11 @@ run_script() {
 # libvirt + cockpit
 # ──────────────────────────────────────────────────────────────────────────────
 
-@test "dx-packages: installs libvirt from the ublue-os packages COPR" {
+@test "dx-packages: installs libvirt from the CentOS repos, no COPR" {
     run_script
     [ "$status" -eq 0 ]
-    grep -q "enablerepo copr:copr.fedorainfracloud.org:ublue-os:packages install" "${DNF_LOG}"
-    grep -q "libvirt-daemon-kvm" "${DNF_LOG}"
+    grep -q "dnf -y install libvirt libvirt-daemon-kvm libvirt-nss virt-install" "${DNF_LOG}"
+    ! grep -q "copr" "${DNF_LOG}"
 }
 
 @test "dx-packages: installs cockpit with weak deps disabled" {
