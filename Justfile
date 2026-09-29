@@ -438,7 +438,7 @@ setup-cache base="bluefin-lts" stream="stable" ghcr="0" event="push":
     echo "{{ base }}-stream10 ${ALLOW_CACHE_WRITE}"
 
 # Build image for GHCR publication — called with sudo by reusable-build.yml.
-# Maps brand_name suffix to ENABLE_NVIDIA build args.
+# Maps brand_name suffix to ENABLE_DX / ENABLE_NVIDIA build args.
 [group('Image')]
 build-ghcr base="bluefin-lts" stream="stable" flavor="main" kernel_pin="":
     #!/usr/bin/bash
@@ -447,9 +447,11 @@ build-ghcr base="bluefin-lts" stream="stable" flavor="main" kernel_pin="":
         echo "build-ghcr must run as root (called via sudo -E)" >&2
         exit 1
     fi
+    DX=0
+    [[ "{{ base }}" == *"-dx"* ]] && DX=1
     NVIDIA=0
     [[ "{{ base }}" == *"nvidia"* ]] && NVIDIA=1
-    {{ just_executable() }} build "{{ base }}" "{{ stream }}" "0" "${NVIDIA}" "{{ kernel_pin }}"
+    {{ just_executable() }} build "{{ base }}" "{{ stream }}" "${DX}" "${NVIDIA}" "{{ kernel_pin }}"
 
 # Generate space-separated alias tags (dated + CentOS version aliases for production).
 [group('Utility')]
