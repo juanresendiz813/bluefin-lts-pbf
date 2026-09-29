@@ -1,0 +1,110 @@
+name: Experiment DX parity (fork only)
+
+# Read-only review helper for projectbluefin/bluefin-lts#611: dumps `rpm -qa`
+# from the old ublue-os DX image, the fork's experimental bluefin-lts-dx image
+# and the published plain bluefin-lts image, then diffs the package-name sets.
+# Publishes nothing; the only secret used is GITHUB_TOKEN, to pull the fork's
+# own package. Not for upstream.
+
+on:
+  push:
+    branches:
+      - experiment/dx-parity
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OLD_DX: ghcr.io/ublue-os/bluefin-dx:lts
+  NEW_DX: ghcr.io/juanresendiz813/bluefin-lts-dx:experiment
+  NEW_PLAIN: ghcr.io/projectbluefin/bluefin-lts:stable
+
+jobs:
+  compare:
+    name: old dx vs new dx vs new plain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h / | tail -1
+          podman --version
+
+      - name: Login to GHCR (fork package may be private)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: echo "${GITHUB_TOKEN}" | podman login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Dump package lists
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          dump() {
+            side="$1"; img="$2"
+            podman pull --platform linux/amd64 "$img"
+            podman image inspect --format '{{.Digest}} kernel={{index .Labels "ostree.linux"}} created={{index .Labels "org.opencontainers.image.created"}} version={{index .Labels "org.opencontainers.image.version"}}' "$img" | tee "out/${side}.meta"
+            podman run --rm "$img" rpm -qa --qf '%{NAME}\n' | sort -u > "out/${side}.names"
+            podman run --rm "$img" rpm -qa --qf '%{NAME}\t%{EVR}\t%{ARCH}\n' | sort > "out/${side}.nevra"
+            podman run --rm "$img" bash -c 'for d in /etc/systemd/system/*.wants /usr/lib/systemd/system/*.wants; do [ -d "$d" ] && for u in "$d"/*; do echo "$(basename "$d")/$(basename "$u")"; done; done | sort' > "out/${side}.wants" || true
+            podman run --rm "$img" bash -c 'cat /usr/share/ublue-os/image-info.json; echo; echo "--- os-release ---"; cat /usr/lib/os-release; echo "--- repo files ---"; ls -1 /etc/yum.repos.d/; echo "--- docker/vscode repo bodies ---"; cat /etc/yum.repos.d/docker-ce.repo /etc/yum.repos.d/packages.microsoft.com_yumrepos_vscode.repo 2>/dev/null; echo "--- rpm sig of code + docker-ce ---"; rpm -qi code 2>/dev/null | grep -E "^(Version|Signature)"; rpm -qi docker-ce 2>/dev/null | grep -E "^(Version|Signature)"' > "out/${side}.imageinfo" || true
+            podman rmi -f "$img" >/dev/null
+            df -h / | tail -1
+          }
+          dump old-dx "$OLD_DX"
+          dump new-dx "$NEW_DX"
+          dump new-plain "$NEW_PLAIN"
+
+          # What the plain migration loses, and how much of it the dx image brings back.
+          comm -23 out/old-dx.names out/new-plain.names > out/lost-in-plain.txt
+          comm -12 out/lost-in-plain.txt out/new-dx.names > out/lost-in-plain-recovered-by-dx.txt
+          comm -23 out/lost-in-plain.txt out/new-dx.names > out/lost-in-plain-still-missing-in-dx.txt
+          comm -23 out/old-dx.names out/new-dx.names > out/only-in-old-dx.txt
+          comm -13 out/old-dx.names out/new-dx.names > out/only-in-new-dx.txt
+          comm -13 out/new-plain.names out/new-dx.names > out/dx-adds-over-plain.txt
+          comm -23 out/new-plain.names out/new-dx.names > out/plain-has-dx-lacks.txt
+
+          {
+            echo "## DX parity"
+            echo
+            echo '```'
+            echo "old-dx:    $OLD_DX";    cat out/old-dx.meta
+            echo "new-dx:    $NEW_DX";    cat out/new-dx.meta
+            echo "new-plain: $NEW_PLAIN"; cat out/new-plain.meta
+            echo '```'
+            echo
+            echo "| set | count |"
+            echo "|---|---|"
+            echo "| packages in old-dx | $(wc -l < out/old-dx.names) |"
+            echo "| packages in new-dx | $(wc -l < out/new-dx.names) |"
+            echo "| packages in new-plain | $(wc -l < out/new-plain.names) |"
+            echo "| lost by old-dx -> new-plain | $(wc -l < out/lost-in-plain.txt) |"
+            echo "| ...of which new-dx brings back | $(wc -l < out/lost-in-plain-recovered-by-dx.txt) |"
+            echo "| ...still missing in new-dx | $(wc -l < out/lost-in-plain-still-missing-in-dx.txt) |"
+            echo "| only in old-dx (vs new-dx) | $(wc -l < out/only-in-old-dx.txt) |"
+            echo "| only in new-dx (vs old-dx) | $(wc -l < out/only-in-new-dx.txt) |"
+            echo "| new-dx adds over new-plain | $(wc -l < out/dx-adds-over-plain.txt) |"
+            echo "| new-plain has, new-dx lacks | $(wc -l < out/plain-has-dx-lacks.txt) |"
+            echo
+            for f in lost-in-plain-recovered-by-dx lost-in-plain-still-missing-in-dx dx-adds-over-plain plain-has-dx-lacks only-in-old-dx only-in-new-dx; do
+              echo "<details><summary>${f}</summary>"; echo; echo '```'; cat "out/${f}.txt"; echo '```'; echo "</details>"; echo
+            done
+            for s in old-dx new-dx new-plain; do
+              echo "<details><summary>${s} image info</summary>"; echo; echo '```'; cat "out/${s}.imageinfo"; echo '```'; echo "</details>"; echo
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload lists
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dx-parity
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
