@@ -1,0 +1,105 @@
+name: Experiment DX (fork only)
+
+# Fork-only experiment for projectbluefin/bluefin-lts#611: does the unwired dx
+# variant still build? Runs the repo's own `just build-ghcr` path (the command
+# reusable-build.yml runs) with the -dx brand suffix, x86_64 only, and pushes
+# the result to this fork's GHCR namespace. No signing, no manifest, no
+# promotion. Not for upstream.
+
+on:
+  push:
+    branches:
+      - experiment/dx
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BRAND_NAME: bluefin-lts-dx
+  STREAM_NAME: experiment
+
+jobs:
+  build:
+    name: Build bluefin-lts-dx (x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup runner
+        uses: projectbluefin/actions/bootc-build/setup-runner@v1
+        with:
+          storage-backend: btrfs
+          update-podman: "true"
+          native-overlay: "true"
+          install-tools: '["just"]'
+
+      - name: Check Just syntax
+        run: just check
+
+      - name: Login to GHCR for layer cache
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: echo "${GITHUB_TOKEN}" | sudo podman login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Build image (ENABLE_DX=1 via the -dx brand suffix)
+        env:
+          REPO_ORGANIZATION: ${{ github.repository_owner }}
+        run: |
+          sudo -E "$(command -v just)" repo_organization="${REPO_ORGANIZATION}" \
+            build-ghcr "${BRAND_NAME}" "${STREAM_NAME}" "main" ""
+
+      - name: Generate and apply alias tags
+        id: tags
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          alias_tags="$(just generate-build-tags "${BRAND_NAME}" "${STREAM_NAME}" main "" 1 "" "${GITHUB_EVENT_NAME}" "")"
+          echo "alias_tags=${alias_tags}" >> "$GITHUB_OUTPUT"
+          sudo -E "$(command -v just)" tag-images "${BRAND_NAME}" "${STREAM_NAME}" "${alias_tags}"
+
+      - name: Push to GHCR
+        id: push
+        uses: projectbluefin/actions/bootc-build/push-image@v1
+        with:
+          image-name: ${{ env.BRAND_NAME }}
+          tags: ${{ env.STREAM_NAME }} ${{ steps.tags.outputs.alias_tags }}
+          default-tag: ${{ env.STREAM_NAME }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Inspect the dx layer
+        continue-on-error: true
+        run: |
+          sudo podman run --rm "localhost/${BRAND_NAME}:${STREAM_NAME}" bash -c '
+            echo "--- image-info.json"; cat /usr/share/ublue-os/image-info.json; echo
+            echo "--- os-release"; grep -E "^(NAME|PRETTY_NAME|VARIANT_ID|BUILD_ID)=" /usr/lib/os-release
+            echo "--- dx packages"; rpm -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-model-plugin code libvirt libvirt-daemon-kvm libvirt-nss virt-install ublue-os-libvirt-workarounds cockpit-bridge cockpit-machines cockpit-networkmanager cockpit-ostree cockpit-podman cockpit-selinux cockpit-storaged cockpit-system
+            echo "--- repo files"; ls -1 /etc/yum.repos.d/
+            echo "--- enabled units"; ls -1 /etc/systemd/system/sockets.target.wants/ 2>/dev/null
+          '
+
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          REGISTRY_PATH: ${{ steps.push.outputs.registry-path }}
+          ALIAS_TAGS: ${{ steps.tags.outputs.alias_tags }}
+        run: |
+          {
+            echo "## bluefin-lts-dx experiment"
+            echo
+            echo "- image: \`${REGISTRY_PATH}/${BRAND_NAME}@${DIGEST}\`"
+            echo "- tags: \`${STREAM_NAME}\` ${ALIAS_TAGS}"
+            echo "- commit: \`${GITHUB_SHA}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
