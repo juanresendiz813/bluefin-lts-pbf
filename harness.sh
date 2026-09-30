@@ -29,11 +29,15 @@ DISK_SIZE="${DISK_SIZE:-30G}"
 mkdir -p "$OUT"
 KEY="$PWD/vm_key"
 [[ -f "$KEY" ]] || ssh-keygen -q -t ed25519 -f "$KEY" -N "" -C "bhv@gha"
+# Run 36669031997: the private key ended up 0644 on the runner and the ssh client
+# silently refused to use it ("Server accepts key" … "bad permissions" only at -vvv),
+# while sshd had already accepted it. Re-assert 0600 before every use (G-035).
+chmod 600 "$KEY"
 SSH_OPTS=(-i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
           -o BatchMode=yes -o ConnectTimeout=15 -o LogLevel=ERROR -p "$SSH_PORT")
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$OUT/harness.log"; }
-vssh() { ssh "${SSH_OPTS[@]}" root@127.0.0.1 "$@"; }
+vssh() { chmod 600 "$KEY"; ssh "${SSH_OPTS[@]}" root@127.0.0.1 "$@"; }
 RESULT="$OUT/RESULT.md"
 note() { printf '%s\n' "$*" >> "$RESULT"; }
 
@@ -118,16 +122,6 @@ install_to_disk() {
     sudo chmod 600 "$vr/.ssh/authorized_keys"
     sudo setfattr -n security.selinux -v 'system_u:object_r:ssh_home_t:s0' "$vr/.ssh" "$vr/.ssh/authorized_keys"
     { echo "--- stateroot var/roothome after key injection"; sudo ls -laZ "$vr"; sudo ls -laZ "$vr/.ssh"; } >> "$OUT/disk-after-install.txt" 2>&1
-    # Run 36666672872: key present, labelled ssh_home_t, sshd up — and every root
-    # attempt still closed at preauth with no "Failed publickey" line. Bypass the
-    # home-directory path with an sshd drop-in (first alphabetically, so it wins
-    # for AuthorizedKeysCommand) and turn on VERBOSE so the journal says why.
-    local dep; dep=$(sudo find /mnt/bhv-rw/ostree/deploy/default/deploy -mindepth 1 -maxdepth 1 -type d | head -1)
-    sudo cp "$KEY.pub" "$dep/etc/ssh/bhv-authorized-keys"; sudo chmod 644 "$dep/etc/ssh/bhv-authorized-keys"
-    printf 'PermitRootLogin yes\nPubkeyAuthentication yes\nAuthorizedKeysCommand /bin/cat /etc/ssh/bhv-authorized-keys\nAuthorizedKeysCommandUser root\nLogLevel VERBOSE\n' | sudo tee "$dep/etc/ssh/sshd_config.d/00-bhv.conf" >/dev/null
-    sudo chmod 600 "$dep/etc/ssh/sshd_config.d/00-bhv.conf"
-    sudo setfattr -n security.selinux -v 'system_u:object_r:etc_t:s0' "$dep/etc/ssh/bhv-authorized-keys" "$dep/etc/ssh/sshd_config.d/00-bhv.conf"
-    { echo "--- sshd drop-in"; sudo ls -laZ "$dep/etc/ssh/sshd_config.d/" "$dep/etc/ssh/bhv-authorized-keys"; sudo cat "$dep/etc/ssh/sshd_config.d/00-bhv.conf"; } >> "$OUT/disk-after-install.txt" 2>&1
     sudo umount /mnt/bhv-rw
   else echo "rw mount of p3 failed — key injection skipped" >> "$OUT/disk-after-install.txt"; fi
   sudo losetup -d "$loop"
@@ -212,7 +206,7 @@ postmortem() {
   tail -200 "$OUT/serial.log" > "$d/serial-tail.log"
   grep -iE 'ordering cycle|deleted to break|Timed out waiting for device' "$OUT/serial.log" > "$d/serial-cycle-lines" || true
   # one verbose client attempt for the record while the VM is still up
-  ssh -vvv -i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=15 -p "$SSH_PORT" root@127.0.0.1 true > "$d/ssh-vvv.log" 2>&1 || true
+  chmod 600 "$KEY"; ssh -vvv -i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=15 -p "$SSH_PORT" root@127.0.0.1 true > "$d/ssh-vvv.log" 2>&1 || true
   vm_stop
   local loop; loop=$(sudo losetup -f --show -P "$DISK")
   sudo mkdir -p /mnt/bhv-root
@@ -270,7 +264,7 @@ if [[ -n "$NEW" ]]; then
   prev=$(cat "$OUT/boot-1-old/boot_id")
   log "switch: bootc switch --enforce-container-sigpolicy $NEW"
   t0=$SECONDS
-  timeout "$SWITCH_TIMEOUT" ssh "${SSH_OPTS[@]}" root@127.0.0.1 "bootc switch --enforce-container-sigpolicy $NEW" > "$OUT/switch.log" 2>&1; src=$?
+  chmod 600 "$KEY"; timeout "$SWITCH_TIMEOUT" ssh "${SSH_OPTS[@]}" root@127.0.0.1 "bootc switch --enforce-container-sigpolicy $NEW" > "$OUT/switch.log" 2>&1; src=$?
   log "switch: rc=$src after $((SECONDS - t0))s"
   note "- \`bootc switch --enforce-container-sigpolicy $NEW\` → rc=$src in $((SECONDS - t0))s (switch.log)"
   if [[ $src -ne 0 ]]; then
