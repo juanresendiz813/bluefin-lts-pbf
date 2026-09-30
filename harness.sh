@@ -38,6 +38,10 @@ SSH_OPTS=(-i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$OUT/harness.log"; }
 vssh() { chmod 600 "$KEY"; ssh "${SSH_OPTS[@]}" root@127.0.0.1 "$@"; }
+# boot_id only, stripped of login-shell noise (the old image's ublue-motd prints an
+# error on stderr for every ssh command; run 36671132972 compared a polluted id
+# with a clean one and declared the post-switch boot "up" after 1 s — G-035 family).
+boot_id() { vssh 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null | grep -oE '^[0-9a-f]{8}-[0-9a-f-]{27}$' | head -1; }
 RESULT="$OUT/RESULT.md"
 note() { printf '%s\n' "$*" >> "$RESULT"; }
 
@@ -158,7 +162,7 @@ vm_stop() { [[ -f /tmp/qemu.pid ]] && sudo kill "$(sudo cat /tmp/qemu.pid)" 2>/d
 wait_boot() {
   local prev="${1:-}" deadline="$2" t0=$SECONDS id
   while (( SECONDS - t0 < deadline )); do
-    id=$(vssh 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true)
+    id=$(boot_id || true)
     if [[ -n "$id" && "$id" != "$prev" ]]; then echo $((SECONDS - t0)); return 0; fi
     sleep 5
   done
@@ -169,13 +173,13 @@ wait_boot() {
 collect() {
   local label="$1" d="$OUT/$1"; mkdir -p "$d"
   log "collect: $label"
-  vssh 'cat /proc/sys/kernel/random/boot_id' > "$d/boot_id" 2>&1
-  vssh 'uname -r' > "$d/uname" 2>&1
+  boot_id > "$d/boot_id"
+  vssh 'uname -r' 2>/dev/null > "$d/uname"
   vssh 'cat /proc/cmdline' > "$d/cmdline" 2>&1
   vssh 'bootc status' > "$d/bootc-status.yaml" 2>&1
-  vssh 'bootc status --format json' > "$d/bootc-status.json" 2>&1
+  vssh 'bootc status --format json' 2>/dev/null > "$d/bootc-status.json"
   vssh 'timeout 240 systemctl is-system-running --wait; echo "rc=$?"' > "$d/is-system-running-wait" 2>&1
-  vssh 'systemctl is-system-running' > "$d/is-system-running" 2>&1
+  vssh 'systemctl is-system-running' 2>/dev/null > "$d/is-system-running"
   vssh 'systemctl list-jobs --no-pager' > "$d/list-jobs" 2>&1
   vssh 'systemctl --failed --no-legend --no-pager' > "$d/failed-units" 2>&1
   vssh 'journalctl -b -o short-precise --no-pager' > "$d/journal-b.log" 2>&1
@@ -195,7 +199,7 @@ collect() {
   dig=$(jq -r '.status.booted.image.imageDigest // "?"' "$d/bootc-status.json" 2>/dev/null)
   cyc=$(wc -l < "$d/cycle-lines"); dto=$(wc -l < "$d/device-timeouts")
   state=$(cat "$d/is-system-running" 2>/dev/null | head -1); kern=$(cat "$d/uname")
-  local line="| $label | $kern | \`$img\` | \`${dig:0:19}\` | $state | $cyc | $dto | $(wc -l < "$d/failed-units") | $(cat "$d/list-jobs" | grep -c ' waiting\| running' || true) |"
+  local line="| $label | $kern | \`$img\` | \`${dig:0:19}\` | $state | $cyc | $dto | $(wc -l < "$d/failed-units") | $(grep -cE '^\s*[0-9]+ ' "$d/list-jobs" || true) |"
   log "collect: $line"
   echo "$line" >> "$OUT/boots.tsv"
 }
@@ -262,6 +266,7 @@ fi
 verdict="BOOTS"; exit_code=0
 if [[ -n "$NEW" ]]; then
   prev=$(cat "$OUT/boot-1-old/boot_id")
+  grep -E 'Queued for next boot|ostree-image-signed|ostree-unverified' "$OUT/switch.log" | sed 's/^/- switch.log: /' >> "$RESULT" || true
   log "switch: bootc switch --enforce-container-sigpolicy $NEW"
   t0=$SECONDS
   chmod 600 "$KEY"; timeout "$SWITCH_TIMEOUT" ssh "${SSH_OPTS[@]}" root@127.0.0.1 "bootc switch --enforce-container-sigpolicy $NEW" > "$OUT/switch.log" 2>&1; src=$?
@@ -276,14 +281,15 @@ if [[ -n "$NEW" ]]; then
     [[ $src -ne 0 ]] && { note "**HARNESS-FAILED: bootc switch failed both ways**"; cat "$OUT/boots.tsv" >> "$RESULT"; exit 2; }
   fi
   vssh 'bootc status' > "$OUT/after-switch-bootc-status.yaml" 2>&1
-  vssh 'bootc status --format json' > "$OUT/after-switch-bootc-status.json" 2>&1
+  vssh 'bootc status --format json' 2>/dev/null > "$OUT/after-switch-bootc-status.json"
   staged=$(jq -r '.status.staged.image.imageDigest // "none"' "$OUT/after-switch-bootc-status.json")
   note "- staged after switch: \`$staged\`"
   vssh 'ls -la /etc/systemd/system/default.target.wants/ 2>&1' > "$OUT/after-switch-wants-booted-etc" 2>&1
   log "reboot into the staged deployment (firmware path: OVMF → shim → grub → ostree:0)"
   vssh 'systemctl reboot' >/dev/null 2>&1 || true
+  sleep 15
   if t=$(wait_boot "$prev" "$POST_SWITCH_DEADLINE"); then
-    log "boot-2 (after switch): ssh after ${t}s"
+    log "boot-2 (after switch): ssh after $((t + 15))s"
     collect boot-2-new
     booted=$(jq -r '.status.booted.image.imageDigest // "?"' "$OUT/boot-2-new/bootc-status.json")
     if [[ "$booted" != "$staged" ]]; then note "- **WARNING: booted digest \`$booted\` != staged \`$staged\` — the new deployment was NOT booted**"; verdict="BOOTED-WRONG-DEPLOYMENT"; exit_code=1; fi
@@ -299,12 +305,13 @@ fi
 # extra reboots of whatever is now booted (only if the previous boot reached ssh)
 if [[ $exit_code -eq 0 ]]; then
   for i in $(seq 1 "$EXTRA_REBOOTS"); do
-    prev=$(vssh 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true)
+    prev=$(boot_id || true)
     n=$((n + 1))
     log "reboot #$n"
     vssh 'systemctl reboot' >/dev/null 2>&1 || true
+    sleep 15
     if t=$(wait_boot "$prev" "$POST_SWITCH_DEADLINE"); then
-      log "boot-$n: ssh after ${t}s"; collect "boot-$n"
+      log "boot-$n: ssh after $((t + 15))s"; collect "boot-$n"
     else
       postmortem "boot-$n"; verdict="HANG (on reboot #$n)"; exit_code=1; break
     fi

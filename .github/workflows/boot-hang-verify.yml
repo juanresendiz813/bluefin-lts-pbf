@@ -32,6 +32,15 @@ jobs:
           - name: dx-hwe-to-stable
             old: ghcr.io/ublue-os/bluefin-dx:lts-hwe
             new: ghcr.io/projectbluefin/bluefin-lts:stable
+          - name: lts-to-stable
+            old: ghcr.io/ublue-os/bluefin:lts
+            new: ghcr.io/projectbluefin/bluefin-lts:stable
+          - name: gdx-to-nvidia-stable
+            old: ghcr.io/ublue-os/bluefin-gdx:lts
+            new: ghcr.io/projectbluefin/bluefin-lts-nvidia:stable
+          - name: dx-hwe-to-testing
+            old: ghcr.io/ublue-os/bluefin-dx:lts-hwe
+            new: ghcr.io/projectbluefin/bluefin-lts:testing
           - name: control-stable-clean
             old: ghcr.io/projectbluefin/bluefin-lts:stable
             new: ""
