@@ -30,7 +30,7 @@ mkdir -p "$OUT"
 KEY="$PWD/vm_key"
 [[ -f "$KEY" ]] || ssh-keygen -q -t ed25519 -f "$KEY" -N "" -C "bhv@gha"
 SSH_OPTS=(-i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-          -o BatchMode=yes -o ConnectTimeout=5 -o LogLevel=ERROR -p "$SSH_PORT")
+          -o BatchMode=yes -o ConnectTimeout=15 -o LogLevel=ERROR -p "$SSH_PORT")
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$OUT/harness.log"; }
 vssh() { ssh "${SSH_OPTS[@]}" root@127.0.0.1 "$@"; }
@@ -55,7 +55,9 @@ image_facts() {
     echo "--- rechunker-group-fix.service (unit as shipped)"; cat /usr/lib/systemd/system/rechunker-group-fix.service 2>&1
     echo "--- rechunker-group-fix ordering lines"; grep -nE "^(After|Before|Wants|Requires)=" /usr/lib/systemd/system/rechunker-group-fix.service 2>&1
     echo "--- wants symlinks in image /etc"; ls -la /etc/systemd/system/default.target.wants/ /etc/systemd/system/multi-user.target.wants/ 2>&1
-    echo "--- sshd PermitRootLogin"; grep -rn PermitRootLogin /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>&1
+    echo "--- sshd effective config (main, uncommented)"; grep -vE "^\s*(#|$)" /etc/ssh/sshd_config 2>&1
+    echo "--- sshd_config.d"; for f in /etc/ssh/sshd_config.d/*; do echo "# $f"; grep -vE "^\s*(#|$)" "$f"; done 2>&1
+    echo "--- root account"; getent passwd root; ls -ld /root; grep -E "^root:" /etc/shadow | cut -c1-12
     echo "--- bootupd payload"; ls /usr/lib/bootupd/updates/EFI/ /usr/lib/bootupd/updates/EFI/* 2>&1 | head -20
     echo "--- bootc --version"; bootc --version 2>&1
   ' > "$d/facts.txt" 2>&1
@@ -112,9 +114,20 @@ install_to_disk() {
     local vr=/mnt/bhv-rw/ostree/deploy/default/var/roothome
     if [[ ! -d "$vr" ]]; then sudo mkdir -m 0700 "$vr"; sudo setfattr -n security.selinux -v 'system_u:object_r:admin_home_t:s0' "$vr"; fi
     sudo mkdir -m 0700 -p "$vr/.ssh"
-    sudo cp "$KEY.pub" "$vr/.ssh/authorized_keys"; sudo chmod 600 "$vr/.ssh/authorized_keys"
+    sudo cp "$KEY.pub" "$vr/.ssh/authorized_keys" || echo "cp of authorized_keys FAILED" >> "$OUT/disk-after-install.txt"
+    sudo chmod 600 "$vr/.ssh/authorized_keys"
     sudo setfattr -n security.selinux -v 'system_u:object_r:ssh_home_t:s0' "$vr/.ssh" "$vr/.ssh/authorized_keys"
-    { echo "--- stateroot var/roothome after key injection"; sudo ls -laZ "$vr" "$vr/.ssh"; } >> "$OUT/disk-after-install.txt" 2>&1
+    { echo "--- stateroot var/roothome after key injection"; sudo ls -laZ "$vr"; sudo ls -laZ "$vr/.ssh"; } >> "$OUT/disk-after-install.txt" 2>&1
+    # Run 36666672872: key present, labelled ssh_home_t, sshd up — and every root
+    # attempt still closed at preauth with no "Failed publickey" line. Bypass the
+    # home-directory path with an sshd drop-in (first alphabetically, so it wins
+    # for AuthorizedKeysCommand) and turn on VERBOSE so the journal says why.
+    local dep; dep=$(sudo find /mnt/bhv-rw/ostree/deploy/default/deploy -mindepth 1 -maxdepth 1 -type d | head -1)
+    sudo cp "$KEY.pub" "$dep/etc/ssh/bhv-authorized-keys"; sudo chmod 644 "$dep/etc/ssh/bhv-authorized-keys"
+    printf 'PermitRootLogin yes\nPubkeyAuthentication yes\nAuthorizedKeysCommand /bin/cat /etc/ssh/bhv-authorized-keys\nAuthorizedKeysCommandUser root\nLogLevel VERBOSE\n' | sudo tee "$dep/etc/ssh/sshd_config.d/00-bhv.conf" >/dev/null
+    sudo chmod 600 "$dep/etc/ssh/sshd_config.d/00-bhv.conf"
+    sudo setfattr -n security.selinux -v 'system_u:object_r:etc_t:s0' "$dep/etc/ssh/bhv-authorized-keys" "$dep/etc/ssh/sshd_config.d/00-bhv.conf"
+    { echo "--- sshd drop-in"; sudo ls -laZ "$dep/etc/ssh/sshd_config.d/" "$dep/etc/ssh/bhv-authorized-keys"; sudo cat "$dep/etc/ssh/sshd_config.d/00-bhv.conf"; } >> "$OUT/disk-after-install.txt" 2>&1
     sudo umount /mnt/bhv-rw
   else echo "rw mount of p3 failed — key injection skipped" >> "$OUT/disk-after-install.txt"; fi
   sudo losetup -d "$loop"
@@ -198,6 +211,8 @@ postmortem() {
   log "postmortem: $label (no SSH) — serial tail + on-disk journal"
   tail -200 "$OUT/serial.log" > "$d/serial-tail.log"
   grep -iE 'ordering cycle|deleted to break|Timed out waiting for device' "$OUT/serial.log" > "$d/serial-cycle-lines" || true
+  # one verbose client attempt for the record while the VM is still up
+  ssh -vvv -i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=15 -p "$SSH_PORT" root@127.0.0.1 true > "$d/ssh-vvv.log" 2>&1 || true
   vm_stop
   local loop; loop=$(sudo losetup -f --show -P "$DISK")
   sudo mkdir -p /mnt/bhv-root
@@ -206,7 +221,7 @@ postmortem() {
     sudo journalctl -D "$j" --list-boots --no-pager > "$d/list-boots" 2>&1
     sudo journalctl -D "$j" -b 0 -o short-precise --no-pager > "$d/journal-last-boot.log" 2>&1
     grep -iE 'ordering cycle|deleted to break' "$d/journal-last-boot.log" > "$d/journal-cycle-lines" || true
-    grep -aiE 'sshd|authorized|roothome|tmpfiles' "$d/journal-last-boot.log" | grep -v 'sshd-session' > "$d/journal-ssh-lines" || true
+    grep -aiE 'sshd|authorized|roothome|publickey|userauth' "$d/journal-last-boot.log" > "$d/journal-ssh-lines" || true
     sudo ls -laZ /mnt/bhv-root/ostree/deploy/default/var/roothome /mnt/bhv-root/ostree/deploy/default/var/roothome/.ssh > "$d/roothome-ls" 2>&1
     sudo umount /mnt/bhv-root
   fi
