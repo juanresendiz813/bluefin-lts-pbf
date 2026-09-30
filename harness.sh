@@ -102,6 +102,21 @@ install_to_disk() {
       echo "--- ESP"; sudo find /mnt/bhv-esp -maxdepth 3 2>&1; sudo umount /mnt/bhv-esp
     else echo "mount p2 (ESP) failed"; fi
   } > "$OUT/disk-after-install.txt" 2>&1
+  # Root SSH key, belt and braces. bootc's own mechanism is a tmpfiles.d `f~` line
+  # for /var/roothome/.ssh/authorized_keys, which needs the .ssh directory to exist
+  # first; run 36665173579 booted fine but every ssh attempt was closed at preauth
+  # (key never accepted). Write the key straight into the stateroot's /var with the
+  # SELinux labels sshd expects (ssh_home_t), so nothing in /etc is touched.
+  sudo mkdir -p /mnt/bhv-rw
+  if sudo mount "${loop}p3" /mnt/bhv-rw; then
+    local vr=/mnt/bhv-rw/ostree/deploy/default/var/roothome
+    if [[ ! -d "$vr" ]]; then sudo mkdir -m 0700 "$vr"; sudo setfattr -n security.selinux -v 'system_u:object_r:admin_home_t:s0' "$vr"; fi
+    sudo mkdir -m 0700 -p "$vr/.ssh"
+    sudo cp "$KEY.pub" "$vr/.ssh/authorized_keys"; sudo chmod 600 "$vr/.ssh/authorized_keys"
+    sudo setfattr -n security.selinux -v 'system_u:object_r:ssh_home_t:s0' "$vr/.ssh" "$vr/.ssh/authorized_keys"
+    { echo "--- stateroot var/roothome after key injection"; sudo ls -laZ "$vr" "$vr/.ssh"; } >> "$OUT/disk-after-install.txt" 2>&1
+    sudo umount /mnt/bhv-rw
+  else echo "rw mount of p3 failed — key injection skipped" >> "$OUT/disk-after-install.txt"; fi
   sudo losetup -d "$loop"
   sudo podman rmi -f "$img" >/dev/null 2>&1 || true
   df -h / | tail -1 | tee -a "$OUT/harness.log"
@@ -191,6 +206,8 @@ postmortem() {
     sudo journalctl -D "$j" --list-boots --no-pager > "$d/list-boots" 2>&1
     sudo journalctl -D "$j" -b 0 -o short-precise --no-pager > "$d/journal-last-boot.log" 2>&1
     grep -iE 'ordering cycle|deleted to break' "$d/journal-last-boot.log" > "$d/journal-cycle-lines" || true
+    grep -aiE 'sshd|authorized|roothome|tmpfiles' "$d/journal-last-boot.log" | grep -v 'sshd-session' > "$d/journal-ssh-lines" || true
+    sudo ls -laZ /mnt/bhv-root/ostree/deploy/default/var/roothome /mnt/bhv-root/ostree/deploy/default/var/roothome/.ssh > "$d/roothome-ls" 2>&1
     sudo umount /mnt/bhv-root
   fi
   sudo losetup -d "$loop"
