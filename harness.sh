@@ -39,7 +39,8 @@ note() { printf '%s\n' "$*" >> "$RESULT"; }
 
 # ---------------------------------------------------------------- image facts
 image_facts() {
-  local side="$1" img="$2" d="$OUT/image-$side"
+  local side="$1" img="$2"
+  local d="$OUT/image-$side"
   mkdir -p "$d"
   log "facts: pulling $img"
   sudo podman pull --quiet "$img" > "$d/pull.log" 2>&1 || { log "pull failed for $img"; cat "$d/pull.log"; return 1; }
