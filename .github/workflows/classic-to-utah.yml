@@ -33,18 +33,22 @@ jobs:
             old: ghcr.io/ublue-os/bluefin:stable
             new: ghcr.io/projectbluefin/utah:testing
             rollback: "1"
+            privileged: "1"
           - name: classic-dx-to-utah
             old: ghcr.io/ublue-os/bluefin-dx:stable
             new: ghcr.io/projectbluefin/utah:testing
             rollback: "1"
+            privileged: "1"
           - name: control-utah-clean
             old: ghcr.io/projectbluefin/utah:testing
             new: ""
             rollback: "0"
+            privileged: "1"
           - name: control-classic-reswitch
             old: ghcr.io/ublue-os/bluefin:stable
             new: "@same"
             rollback: "0"
+            privileged: "0"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -73,6 +77,7 @@ jobs:
           NEW: ${{ matrix.new }}
           LANE: ${{ matrix.name }}
           ROLLBACK: ${{ matrix.rollback }}
+          RUN_PRIVILEGED_SETUP: ${{ matrix.privileged }}
         run: bash ./harness.sh
 
       - name: Upload evidence

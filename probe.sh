@@ -21,7 +21,15 @@ pgrep -a -f 'gdm' 2>&1 | head -3
 sec selinux-state
 getenforce 2>&1
 sestatus 2>&1 | head -8
-ls -la /etc/selinux/targeted/contexts/files/ 2>&1
+ls -laZ --time-style=full-iso /etc/selinux/targeted/contexts/files/ 2>&1
+# Which binary policy is loaded: the deployment's /etc copy (carried across a switch by the 3-way merge
+# when it differs from the old default) or the image's /usr/etc default?
+echo "--- policy.35 /etc vs /usr/etc"; ls -laZ --time-style=full-iso /etc/selinux/targeted/policy/ /usr/etc/selinux/targeted/policy/ 2>&1
+sha256sum /etc/selinux/targeted/policy/policy.35 /usr/etc/selinux/targeted/policy/policy.35 /etc/selinux/targeted/contexts/files/file_contexts /usr/etc/selinux/targeted/contexts/files/file_contexts 2>&1 | sed -E 's/^([0-9a-f]{16})[0-9a-f]+/\1/'
+echo "--- kernel: permissions not defined in loaded policy"; journalctl -b -k --no-pager 2>/dev/null | grep -c 'not defined in policy'
+echo "--- policy load lines"; journalctl -b --no-pager 2>/dev/null | grep -iE 'Successfully loaded SELinux policy|policy capability|SELinux: +policy' | head -4
+echo "--- rpm"; rpm -q selinux-policy-targeted 2>&1
+echo "--- getsebool sample"; getsebool -a 2>/dev/null | wc -l
 echo "--- policy store /var/lib/selinux/targeted"; ls -A /var/lib/selinux/targeted 2>&1 | head
 
 sec subs-dist
