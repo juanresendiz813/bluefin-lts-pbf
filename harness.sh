@@ -202,9 +202,12 @@ collect() {
   grep -iE 'ordering cycle|deleted to break' "$d/journal-b.log" > "$d/cycle-lines" || true
   grep -iE 'Timed out waiting for device|Dependency failed for' "$d/journal-b.log" > "$d/device-timeouts" || true
   vssh 'systemd-analyze critical-chain --no-pager 2>&1' > "$d/critical-chain" 2>&1
-  # the sectioned probe: one file per "### section"
-  chmod 600 "$KEY"; ssh "${SSH_OPTS[@]}" root@127.0.0.1 "TU=$TU bash -s" < "$PWD/probe.sh" > "$d/probe.txt" 2>&1
+  # the sectioned probe: one file per "### section". Copied in and run by path — streaming it on
+  # stdin (`bash -s`) let `ausearch` eat everything after the avc section in run 37068137827.
+  vssh 'cat > /root/probe.sh' < "$PWD/probe.sh"
+  vssh "TU=$TU bash /root/probe.sh" > "$d/probe.txt" 2>&1
   awk -v dir="$d" '/^### /{f=dir"/"$2; next} f{print > f}' "$d/probe.txt"
+  printf 'sections=%s\n' "$(grep -c '^### ' "$d/probe.txt")" >> "$OUT/harness.log"
 
   local img dig state kern gdm vh sshl avc sedp esp
   img=$(jq -r '.status.booted.image.image.image // "?"' "$d/bootc-status.json" 2>/dev/null)
@@ -279,7 +282,8 @@ vm_start
 if t=$(wait_boot "" "$FIRST_BOOT_DEADLINE"); then
   log "boot-1 (OLD, first boot): ssh after ${t}s"
   log "prep: user $TU + ~/.ssh + /etc markers on the OLD system"
-  chmod 600 "$KEY"; ssh "${SSH_OPTS[@]}" root@127.0.0.1 "PUBKEY='$(cat "$KEY.pub")' LANE='$LANE' TU='$TU' bash -s" < "$PWD/prep.sh" > "$OUT/prep.log" 2>&1
+  vssh 'cat > /root/prep.sh' < "$PWD/prep.sh"
+  vssh "PUBKEY='$(cat "$KEY.pub")' LANE='$LANE' TU='$TU' bash /root/prep.sh" > "$OUT/prep.log" 2>&1
   collect boot-1-old
 else
   postmortem boot-1-old

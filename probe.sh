@@ -57,7 +57,8 @@ sec avc
 journalctl -b --no-pager -o short-precise 2>/dev/null | grep -iE 'avc: +denied' > /tmp/avc.txt
 echo "avc_denied_lines=$(wc -l < /tmp/avc.txt)"
 sed -E 's/ pid=[0-9]+//; s/ ino=[0-9]+//; s/^[^ ]+ [^ ]+ [^ ]+ //' /tmp/avc.txt | sort | uniq -c | sort -rn | head -30
-if command -v ausearch >/dev/null 2>&1; then ausearch -m avc -ts boot 2>&1 | tail -20; else echo "ausearch: not available"; fi
+# ausearch reads stdin when it is a pipe (run 37068137827: it swallowed the rest of this script) — never give it one.
+if command -v ausearch >/dev/null 2>&1; then ausearch -m avc -ts boot 2>&1 </dev/null | tail -20; else echo "ausearch: not available"; fi
 
 sec sed-permission-journal
 journalctl -b --no-pager 2>/dev/null | grep -iE 'sed: .*(ermission denied|file creation context)|failed to set default file creation context|Regex version mismatch' | head -20
@@ -102,6 +103,11 @@ echo "--- policy.json vs pristine /usr/etc"; diff -u /usr/etc/containers/policy.
 echo "--- registries.d"; ls -la /etc/containers/registries.d 2>&1; for f in /etc/containers/registries.d/*; do echo "== $f"; cat "$f"; done 2>&1
 echo "--- /etc/pki/containers"; ls -la /etc/pki/containers 2>&1
 echo "--- useradd HOME"; grep -E '^HOME=' /etc/default/useradd 2>&1
+# Utah README "Known gaps: cross-vendor switch and update timers": Bluefin's timers.target.wants symlink
+# for bootc-fetch-apply-updates.timer carries across the /etc merge while Utah masks the unit (utah#101).
+echo "--- bootc-fetch-apply-updates"; for u in bootc-fetch-apply-updates.timer bootc-fetch-apply-updates.service; do printf '%s: is-enabled=%s is-active=%s\n' "$u" "$(systemctl is-enabled "$u" 2>&1)" "$(systemctl is-active "$u" 2>&1)"; done
+ls -la /etc/systemd/system/timers.target.wants/ /etc/systemd/system/bootc-fetch-apply-updates.* /usr/lib/systemd/system/bootc-fetch-apply-updates.* 2>&1
+systemctl list-timers --all --no-pager 2>&1 | grep -iE 'bootc|NEXT'
 
 sec userdata
 ls -la "/var/home/$TU" 2>&1
