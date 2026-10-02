@@ -73,11 +73,20 @@ ESP=$(findmnt -nro TARGET -t vfat 2>/dev/null | head -1)
 echo "esp_mount=${ESP:-NONE}"
 findmnt -no TARGET,SOURCE,FSTYPE,OPTIONS / /boot /boot/efi /efi /sysroot 2>&1
 df -h /boot /boot/efi 2>&1
+# A bootc-installed system has no fstab and nothing mounts the ESP at runtime (08 §4.1); bootupd mounts
+# it itself when it runs. Mount the vfat partition read-only for the listing, then put it back.
+MOUNTED_HERE=0
+if [[ -z "$ESP" ]]; then
+  ESPDEV=$(lsblk -nro PATH,FSTYPE 2>/dev/null | awk '$2=="vfat"{print $1; exit}')
+  echo "esp_device=${ESPDEV:-NONE}"
+  if [[ -n "$ESPDEV" ]]; then mkdir -p /run/c2u-esp && mount -o ro "$ESPDEV" /run/c2u-esp 2>&1 && { ESP=/run/c2u-esp; MOUNTED_HERE=1; }; fi
+fi
 if [[ -n "$ESP" ]]; then
   echo "--- files (bytes path)"; (cd "$ESP" && find . -type f -printf '%10s %p\n' | sort -k2) 2>&1
-  echo "--- du"; du -sh "$ESP"/EFI/* 2>&1
+  echo "--- du"; du -sh "$ESP"/EFI/* 2>&1; df -h "$ESP" 2>&1 | tail -1
   echo "--- efi hashes"; find "$ESP" -name '*.efi' -type f -exec sha256sum {} + 2>&1 | sed -E 's/^([0-9a-f]{16})[0-9a-f]+/\1/'
   echo "--- grub.cfg"; find "$ESP" -name grub.cfg -exec sh -c 'echo "== $1"; cat "$1"' _ {} \; 2>&1 | head -60
+  [[ $MOUNTED_HERE == 1 ]] && umount /run/c2u-esp 2>&1
 fi
 
 sec boot-dir
@@ -128,7 +137,7 @@ sec hooks
 journalctl -b --no-pager -u ublue-system-setup.service 2>&1 | tail -80
 echo "--- user-setup"; journalctl -b --no-pager -u 'ublue-user-setup*' 2>&1 | tail -20
 echo "--- hook lines"; journalctl -b --no-pager 2>/dev/null | grep -iE 'bootupctl-adopt|home-labels|adopt-and-update|restorecon' | head -40
-echo "--- recorded versions"; find /etc/ublue -type f -exec sh -c 'printf "%s: " "$1"; cat "$1"; echo' _ {} \; 2>&1
+echo "--- recorded versions (libsetup.sh stores them per invoking user)"; for f in /root/.local/share/ublue/setup_versioning.json /var/roothome/.local/share/ublue/setup_versioning.json "/var/home/$TU/.local/share/ublue/setup_versioning.json"; do [[ -f "$f" ]] && { echo "== $f"; cat "$f"; echo; }; done; ls -la /etc/ublue 2>&1 | head -3
 
 sec failed-detail
 systemctl --failed --no-legend --no-pager 2>&1

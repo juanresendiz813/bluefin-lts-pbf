@@ -384,6 +384,23 @@ if [[ -n "$NEW" && "$ROLLBACK" == "1" && $exit_code -eq 0 ]]; then
 fi
 
 vm_stop
+# Final on-disk state from the host (ESP + BLS entries + deployments), to compare with disk-after-install.txt.
+loop=$(sudo losetup -f --show -P "$DISK"); find_parts "$loop"
+sudo mkdir -p /mnt/bhv-root /mnt/bhv-esp
+{
+  if [[ -n "$ESP_PART" ]] && sudo mount -o ro "$ESP_PART" /mnt/bhv-esp 2>/dev/null; then
+    echo "--- ESP (final)"; (cd /mnt/bhv-esp && sudo find . -type f -printf '%10s %p\n' | sort -k2) 2>&1
+    echo "--- ESP efi hashes (final)"; sudo find /mnt/bhv-esp -name '*.efi' -type f -exec sha256sum {} + 2>&1 | sed -E 's/^([0-9a-f]{16})[0-9a-f]+/\1/'
+    sudo umount /mnt/bhv-esp
+  else echo "mount ESP failed"; fi
+  if [[ -n "$ROOT_PART" ]] && sudo mount -o ro "$ROOT_PART" /mnt/bhv-root 2>/dev/null; then
+    echo "--- boot/loader/entries (final)"; sudo find /mnt/bhv-root/boot/loader/entries/ -type f -exec sh -c 'echo "== $1"; cat "$1"' _ {} \; 2>&1
+    echo "--- boot/ostree (final)"; sudo du -sh /mnt/bhv-root/boot/ostree/* 2>&1
+    echo "--- deployments (final)"; sudo ls -la /mnt/bhv-root/ostree/deploy/default/deploy/ 2>&1
+    sudo umount /mnt/bhv-root
+  else echo "mount root failed"; fi
+} > "$OUT/disk-final.txt" 2>&1
+sudo losetup -d "$loop"
 {
   echo; echo "## Boots"; echo; cat "$OUT/boots.tsv"; echo
   echo "## Verdict: **$verdict** — ordering-cycle journal lines across all boots: $(cat "$OUT"/boot-*/cycle-lines 2>/dev/null | wc -l)"
