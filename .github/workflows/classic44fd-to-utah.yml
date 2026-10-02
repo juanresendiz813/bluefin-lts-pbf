@@ -1,0 +1,89 @@
+name: Classic F44 (Fedora-direct) → Utah switch verification (review only)
+
+# Same harness as classic-to-utah.yml, with the operator's Fedora-direct F44 Classic
+# builds (fork images, unsigned, branch feat/fedora-direct-base-v2) as the source, to
+# compare cell by cell against the silverblue-main F44 lanes (ublue-os/bluefin:stable).
+# Sources are pinned by digest here (resolved 2026-10-02 via ghcr GET /v2/.../manifests,
+# single OCI manifests, config labels revision d557245a…, kernel 7.2.7-200.fc44):
+#   bluefin:latest-44.20260927    = sha256:45d94f7045546b9a7f370de56216e5270fc82d1d02ff823098d951b0b8f09d50
+#   bluefin-dx:latest-44.20260927 = sha256:d1d18324338497ecf03011dd59d7990c688729d95ee6881014e357b9b6ad3f5a
+# The re-switch control targets the tag form of the same digest (what "@same" resolves
+# to on a run-time-pinned lane; harness.sh cannot derive a tag from a digest-form OLD).
+# Runs only on this review branch; publishes nothing; no secrets.
+
+on:
+  push:
+    branches:
+      - review/classic44fd-to-utah
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: classic44fd-to-utah-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  lane:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 170
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: fd44-classic-to-utah
+            old: ghcr.io/juanresendiz813/bluefin@sha256:45d94f7045546b9a7f370de56216e5270fc82d1d02ff823098d951b0b8f09d50
+            new: ghcr.io/projectbluefin/utah:testing
+            rollback: "1"
+            privileged: "1"
+          - name: fd44-classic-dx-to-utah
+            old: ghcr.io/juanresendiz813/bluefin-dx@sha256:d1d18324338497ecf03011dd59d7990c688729d95ee6881014e357b9b6ad3f5a
+            new: ghcr.io/projectbluefin/utah:testing
+            rollback: "1"
+            privileged: "1"
+          - name: control-fd44-reswitch
+            old: ghcr.io/juanresendiz813/bluefin@sha256:45d94f7045546b9a7f370de56216e5270fc82d1d02ff823098d951b0b8f09d50
+            new: ghcr.io/juanresendiz813/bluefin:latest-44.20260927
+            rollback: "0"
+            privileged: "0"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker system prune -af >/dev/null 2>&1 || true
+          df -h / /mnt | tail -2
+          podman --version; skopeo --version; jq --version
+
+      - name: Enable KVM for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+
+      - name: Install QEMU + OVMF
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 ovmf attr
+          ls -la /usr/share/OVMF/
+
+      - name: Run harness
+        env:
+          OLD: ${{ matrix.old }}
+          NEW: ${{ matrix.new }}
+          LANE: ${{ matrix.name }}
+          ROLLBACK: ${{ matrix.rollback }}
+          RUN_PRIVILEGED_SETUP: ${{ matrix.privileged }}
+        run: bash ./harness.sh
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: classic44fd-utah-${{ matrix.name }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
