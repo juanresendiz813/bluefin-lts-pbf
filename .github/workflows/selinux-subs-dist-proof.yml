@@ -1,0 +1,69 @@
+name: SELinux subs_dist proof (fork only)
+
+# Fork-only proof for the file_contexts.subs_dist fix (ublue-os/bluefin-lts#1599,
+# ublue-os/bluefin#4976). Builds bluefin-lts from this branch with the repo's own
+# `just build`, then reads the file and the resulting label inside the image.
+# Nothing is pushed or signed. Not for upstream.
+
+on:
+  push:
+    branches:
+      - test/selinux-subs-dist-proof
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build bluefin-lts and check file_contexts.subs_dist
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Setup runner
+        uses: projectbluefin/actions/bootc-build/setup-runner@v1
+        with:
+          storage-backend: btrfs
+          update-podman: "true"
+          native-overlay: "true"
+          install-tools: '["just"]'
+
+      - name: Check Just syntax
+        run: just check
+
+      - name: Build bluefin-lts (x86_64, no publish)
+        run: sudo -E "$(command -v just)" build bluefin-lts stable 0 0
+
+      - name: Inspect the built image
+        run: |
+          sudo podman run --rm localhost/bluefin-lts:stable bash -c '
+            set -o pipefail
+            echo "--- rpm -q"; rpm -q selinux-policy-targeted libselinux-utils
+            echo "--- home lines in file_contexts.subs_dist"
+            grep -n home /etc/selinux/targeted/contexts/files/file_contexts.subs_dist
+            echo "--- rpm -V selinux-policy-targeted (subs_dist line only)"
+            rpm -V selinux-policy-targeted | grep file_contexts.subs_dist || echo "(unchanged vs RPM payload)"
+            echo "--- matchpathcon"
+            matchpathcon /var/home /var/home/x /var/home/x/.ssh /var/home/x/.ssh/authorized_keys
+            echo "--- assertion"
+            matchpathcon -n /var/home/x/.ssh | grep -F -e ":ssh_home_t:"
+          '
+
+      - name: Control, published projectbluefin/bluefin-lts:stable (expected default_t before the fix lands)
+        run: |
+          sudo podman run --rm ghcr.io/projectbluefin/bluefin-lts:stable bash -c '
+            echo "--- rpm -q"; rpm -q selinux-policy-targeted
+            echo "--- home lines in file_contexts.subs_dist"
+            grep -n home /etc/selinux/targeted/contexts/files/file_contexts.subs_dist
+            echo "--- matchpathcon"
+            matchpathcon /var/home/x/.ssh /var/home/x/.ssh/authorized_keys
+          '
