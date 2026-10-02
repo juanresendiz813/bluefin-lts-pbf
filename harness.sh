@@ -51,7 +51,11 @@ image_facts() {
   mkdir -p "$d"
   log "facts: pulling $img"
   sudo podman pull --quiet "$img" > "$d/pull.log" 2>&1 || { log "pull failed for $img"; cat "$d/pull.log"; return 1; }
-  skopeo inspect --raw "docker://$img" | sha256sum | awk '{print "index sha256:"$1}' > "$d/digest"
+  local idx; idx=$(skopeo inspect --raw "docker://$img" | sha256sum | awk '{print $1}')
+  echo "index sha256:$idx" > "$d/digest"
+  # Is there a cosign signature for this digest at all? (sigstore attachment tag; the fork's F45 images are unsigned)
+  local sigref="${img%%:*}"; sigref="${sigref%%@*}:sha256-${idx}.sig"
+  if skopeo inspect --raw "docker://$sigref" >/dev/null 2>&1; then echo "cosign-signature-tag=present ($sigref)" >> "$d/digest"; else echo "cosign-signature-tag=ABSENT ($sigref)" >> "$d/digest"; fi
   sudo podman image inspect --format 'manifest {{.Digest}}{{"\n"}}created={{index .Labels "org.opencontainers.image.created"}}{{"\n"}}version={{index .Labels "org.opencontainers.image.version"}}{{"\n"}}revision={{index .Labels "org.opencontainers.image.revision"}}{{"\n"}}ostree.linux={{index .Labels "ostree.linux"}}' "$img" >> "$d/digest" 2>&1
   sudo podman run --rm "$img" bash -c '
     echo "--- rpm"; rpm -q bootc bootupd ostree systemd shim-x64 grub2-efi-x64 selinux-policy-targeted systemd-boot-unsigned rpm-ostree gdm 2>&1
@@ -257,10 +261,17 @@ postmortem() {
   echo
 } > "$RESULT"
 
+OLD_TAG="$OLD"
+dg=$(skopeo inspect --raw "docker://$OLD" | sha256sum | awk '{print $1}')
+OLD_PIN="${OLD%%:*}@sha256:$dg"
+if [[ "${PIN_OLD:-0}" == "1" ]]; then
+  OLD="$OLD_PIN"
+  note "- OLD pinned by digest at run time: \`$OLD_TAG\` → \`$OLD\`"
+fi
 if [[ "$NEW" == "@same" ]]; then
-  dg=$(skopeo inspect --raw "docker://$OLD" | sha256sum | awk '{print $1}')
-  NEW="${OLD%%:*}@sha256:$dg"
-  note "- NEW resolved from \`@same\`: \`$NEW\` (index digest of OLD at run time)"
+  # re-switch to the same bytes under a different reference string (identical refs are a no-op for bootc)
+  if [[ "$OLD" == "$OLD_PIN" ]]; then NEW="$OLD_TAG"; else NEW="$OLD_PIN"; fi
+  note "- NEW resolved from \`@same\`: \`$NEW\` (same index digest \`sha256:${dg:0:12}…\` as OLD)"
 fi
 
 image_facts old "$OLD" || { note "**HARNESS-FAILED: cannot pull OLD**"; exit 2; }
@@ -332,6 +343,17 @@ if [[ -n "$NEW" ]]; then
     verdict="HANG"; exit_code=1
   fi
   n=2
+fi
+
+# Utah's privileged hooks (05-bootupctl-adopt, 20-home-labels, 99-flatpaks …) only run when a wheel user's
+# GNOME session calls `pkexec /usr/bin/ublue-privileged-setup` (common 99-privileged.sh). Nobody logs into
+# this VM — run 37068137827 showed the gdm-greeter's attempt dying with pkexec 127 — so simulate the first
+# admin login once, right after the first boot of a Utah deployment, and probe again in the same boot.
+if [[ $exit_code -eq 0 && "${RUN_PRIVILEGED_SETUP:-0}" == "1" ]]; then
+  log "privileged-setup: simulating the first admin login (timeout 900 /usr/bin/ublue-privileged-setup)"
+  vssh 'ls /usr/share/ublue-os/privileged-setup.hooks.d/; timeout 900 /usr/bin/ublue-privileged-setup; echo "privileged-setup rc=$?"' > "$OUT/privileged-setup.log" 2>&1
+  note "- simulated first admin login: \`/usr/bin/ublue-privileged-setup\` → $(grep -oE 'privileged-setup rc=[0-9]+' "$OUT/privileged-setup.log" | tail -1) (privileged-setup.log; same boot re-probed as \`boot-$n-after-privileged-setup\`)"
+  collect "boot-$n-after-privileged-setup"
 fi
 
 # extra reboots of whatever is now booted (only if the previous boot reached ssh)
