@@ -1,0 +1,101 @@
+name: pr-e2e smoke proof (fork only)
+
+# Fork-only experiment. Not for upstream. Runs pr-e2e.yml's compose + smoke path
+# twice on ONE pinned :testing digest: "control" = the compose Containerfile as
+# it is upstream today (with `systemctl preset-all`), "fixed" = the one-line fix
+# on fix/pr-e2e-keep-unit-enablement. Images go to this fork's own GHCR package.
+
+on:
+  push:
+    branches:
+      - test/pr-e2e-compose-proof
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose:
+    name: Compose ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [control, fixed]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
+
+      - name: Pin base and write compose Containerfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          d=$(skopeo inspect --format '{{.Digest}}' docker://ghcr.io/projectbluefin/bluefin-lts:testing)
+          echo "base digest ${d}"
+          if [[ "${{ matrix.variant }}" == control ]]; then
+            run_line='RUN glib-compile-schemas /usr/share/glib-2.0/schemas && \
+              systemctl preset-all 2>/dev/null || true'
+          else
+            run_line='RUN glib-compile-schemas /usr/share/glib-2.0/schemas'
+          fi
+          printf 'FROM ghcr.io/projectbluefin/bluefin-lts@%s\n\nCOPY system_files/ /\n\n%s\n' "$d" "$run_line" > Containerfile.pr-e2e
+          cat Containerfile.pr-e2e
+
+      - name: Build composed test image
+        id: build
+        uses: redhat-actions/buildah-build@719e3c40d8af9790c23eca13f7daa339f2867034 # v3
+        with:
+          containerfiles: ./Containerfile.pr-e2e
+          image: bluefin-lts-pr-e2e-proof
+          tags: ${{ matrix.variant }}-${{ github.sha }}
+          oci: true
+
+      - name: Login to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push composed test image
+        uses: redhat-actions/push-to-registry@94ade333c38ecc0e60e94785125d9a52ca423b37 # v3
+        with:
+          image: ${{ steps.build.outputs.image }}
+          tags: ${{ steps.build.outputs.tags }}
+          registry: ghcr.io/${{ github.repository_owner }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          extra-args: |
+            --compression-format=zstd:chunked
+
+  e2e-control:
+    name: E2E control (preset-all)
+    needs: compose
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/run-testsuite.yml
+    with:
+      image: ghcr.io/${{ github.repository_owner }}/bluefin-lts-pr-e2e-proof:control-${{ github.sha }}
+      suites: smoke
+    secrets: inherit
+
+  e2e-fixed:
+    name: E2E fixed (no preset-all)
+    needs: compose
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/run-testsuite.yml
+    with:
+      image: ghcr.io/${{ github.repository_owner }}/bluefin-lts-pr-e2e-proof:fixed-${{ github.sha }}
+      suites: smoke
+    secrets: inherit
