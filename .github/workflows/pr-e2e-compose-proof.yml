@@ -1,0 +1,145 @@
+name: pr-e2e compose proof (fork only)
+
+# Fork-only experiment. Not for upstream. Rebuilds pr-e2e.yml's "Compose PR test
+# image" step on top of ONE pinned :testing digest, in variants, and diffs each
+# composed image against the base: systemd enablement symlinks, the GNOME
+# extension tree, and the compiled GSettings schemas. Nothing is pushed.
+
+on:
+  push:
+    branches:
+      - test/pr-e2e-compose-proof
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diff:
+    name: Compose variants vs base
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Checkout (submodules, as pr-e2e.yml does today)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
+          path: with-sub
+
+      - name: Checkout (no submodules)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: false
+          path: no-sub
+
+      - name: Pin base digest
+        id: pin
+        run: |
+          set -euo pipefail
+          d=$(skopeo inspect --format '{{.Digest}}' docker://ghcr.io/projectbluefin/bluefin-lts:testing)
+          echo "base=ghcr.io/projectbluefin/bluefin-lts@${d}" >> "$GITHUB_OUTPUT"
+          echo "base=ghcr.io/projectbluefin/bluefin-lts@${d}"
+          podman --version; buildah --version
+          sudo podman pull -q "ghcr.io/projectbluefin/bluefin-lts@${d}"
+
+      - name: Build variants
+        env:
+          BASE: ${{ steps.pin.outputs.base }}
+        run: |
+          set -euo pipefail
+          # control = pr-e2e.yml's Containerfile verbatim (FROM pinned)
+          cat > Containerfile.preset <<EOF
+          FROM ${BASE}
+
+          COPY system_files/ /
+
+          RUN glib-compile-schemas /usr/share/glib-2.0/schemas && \\
+              systemctl preset-all 2>/dev/null || true
+          EOF
+          cat > Containerfile.nopreset <<EOF
+          FROM ${BASE}
+
+          COPY system_files/ /
+
+          RUN glib-compile-schemas /usr/share/glib-2.0/schemas
+          EOF
+          cat Containerfile.preset Containerfile.nopreset
+          sudo podman build -q -f Containerfile.preset   -t localhost/v:control  with-sub
+          sudo podman build -q -f Containerfile.nopreset -t localhost/v:nopreset with-sub
+          sudo podman build -q -f Containerfile.preset   -t localhost/v:nosub    no-sub
+          sudo podman build -q -f Containerfile.nopreset -t localhost/v:fixed    no-sub
+          df -h /
+
+      - name: Snapshot each image
+        env:
+          BASE: ${{ steps.pin.outputs.base }}
+        run: |
+          set -euo pipefail
+          cat > snap.sh <<'EOF'
+          set -u
+          echo "## units"
+          for d in /etc/systemd/system /etc/systemd/user /usr/lib/systemd/system /usr/lib/systemd/user; do
+            find "$d" -type l -printf '%p -> %l\n' 2>/dev/null
+          done | sort
+          echo "## ext-tree"
+          find /usr/share/gnome-shell/extensions -maxdepth 1 | sort
+          echo "## ext-files"
+          find /usr/share/gnome-shell/extensions -type f -print0 | sort -z | xargs -0 sha256sum
+          echo "## schemas"
+          sha256sum /usr/share/glib-2.0/schemas/gschemas.compiled
+          EOF
+          mkdir -p snaps
+          for t in base control nopreset nosub fixed; do
+            ref="localhost/v:${t}"; [[ "$t" == base ]] && ref="${BASE}"
+            sudo podman run --rm --entrypoint '' -v "$PWD/snap.sh:/snap.sh:ro,z" "$ref" bash /snap.sh > "snaps/${t}.txt"
+            wc -l "snaps/${t}.txt"
+          done
+
+      - name: Diff vs base
+        run: |
+          set -uo pipefail
+          sec() { awk -v s="## $2" '$0==s{p=1;next} /^## /{p=0} p' "snaps/$1.txt"; }
+          for t in control nopreset nosub fixed; do
+            echo "================ ${t} vs base ================"
+            for s in units ext-tree schemas; do
+              echo "---- ${s}"
+              diff <(sec base "$s") <(sec "$t" "$s") && echo "(identical)"
+            done
+            echo "---- ext-files (changed/added/removed paths, count per extension dir)"
+            diff <(sec base ext-files) <(sec "$t" ext-files) | grep '^[<>]' | awk '{print $1, $3}' \
+              | sed -E 's#(/usr/share/gnome-shell/extensions/[^/]+).*#\1#' | sort | uniq -c || true
+          done
+
+      - name: Spot checks
+        env:
+          BASE: ${{ steps.pin.outputs.base }}
+        run: |
+          set -uo pipefail
+          for t in base control fixed; do
+            ref="localhost/v:${t}"; [[ "$t" == base ]] && ref="${BASE}"
+            echo "================ ${t}"
+            sudo podman run --rm --entrypoint '' "$ref" bash -c '
+              for u in tailscaled.service systemd-resolved.service sshd.service gdm.service firewalld.service uupd.timer \
+                       ublue-system-setup.service bluefin-lts-countme.timer bootc-unified-storage.service dconf-update.service; do
+                printf "%-34s %s\n" "$u" "$(systemctl is-enabled "$u" 2>&1)"
+              done
+              printf "%-34s %s\n" "user ublue-user-setup.service" "$(systemctl --global is-enabled ublue-user-setup.service 2>&1)"
+              printf "%-34s %s\n" "user podman-auto-update.timer" "$(systemctl --global is-enabled podman-auto-update.timer 2>&1)"
+              ls -la /usr/share/gnome-shell/extensions/
+            '
+          done
+
+      - name: Upload snapshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: snaps
+          path: snaps/
