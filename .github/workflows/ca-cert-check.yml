@@ -11,10 +11,10 @@ jobs:
       fail-fast: false
       matrix:
         img:
-          - ghcr.io/ublue-os/bluefin:stable-daily
-          - ghcr.io/ublue-os/bluefin-dx:stable-daily
-          - ghcr.io/ublue-os/bluefin:latest
           - ghcr.io/ublue-os/bluefin:stable
+          - ghcr.io/ublue-os/bluefin-dx:stable
+          - ghcr.io/ublue-os/bluefin-nvidia-open:stable
+          - ghcr.io/ublue-os/bluefin:stable-20261013
     steps:
       - name: Free disk
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL; df -h /
