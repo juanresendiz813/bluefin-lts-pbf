@@ -11,9 +11,9 @@ jobs:
       fail-fast: false
       matrix:
         img:
-          - quay.io/fedora-ostree-desktops/silverblue:44.20261022.0
-          - ghcr.io/ublue-os/silverblue-main@sha256:8bcbc35c12300fdd74c589f255da3820d669d1f1ff03180a8497c2871ece416c
-          - ghcr.io/ublue-os/silverblue-main@sha256:43b22c295f1b860a3b0674c24336ac7ef997c70c9e8e9c488f34a472726c1e51
+          - ghcr.io/ublue-os/bluefin:stable-daily
+          - ghcr.io/ublue-os/bluefin-dx:stable-daily
+          - ghcr.io/ublue-os/bluefin:latest
           - ghcr.io/ublue-os/bluefin:stable
     steps:
       - name: Free disk
