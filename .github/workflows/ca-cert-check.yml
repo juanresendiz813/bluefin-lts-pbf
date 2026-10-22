@@ -1,0 +1,30 @@
+name: CA cert check (review only)
+on:
+  push:
+    branches: [review/ca-cert-check]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        img:
+          - quay.io/fedora-ostree-desktops/silverblue:44.20261022.0
+          - ghcr.io/ublue-os/silverblue-main@sha256:8bcbc35c12300fdd74c589f255da3820d669d1f1ff03180a8497c2871ece416c
+          - ghcr.io/ublue-os/silverblue-main@sha256:43b22c295f1b860a3b0674c24336ac7ef997c70c9e8e9c488f34a472726c1e51
+          - ghcr.io/ublue-os/bluefin:stable
+    steps:
+      - name: Free disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL; df -h /
+      - name: Inspect
+        env:
+          IMG: ${{ matrix.img }}
+        run: |
+          set -x
+          podman pull -q "$IMG" >/dev/null
+          podman run --rm "$IMG" rpm -q ca-certificates
+          podman run --rm "$IMG" sh -c 'trust list | grep -ciE "emSign ECC Root CA - G3|AAA Certificate Services" || true'
+          podman run --rm "$IMG" sh -c 'curl -sS -o /dev/null --max-time 20 https://dv-g3b-emudhra.we-have-a-problem.com/; echo "emudhra rc=$?"'
+          podman run --rm "$IMG" sh -c 'curl -sS -o /dev/null --max-time 20 https://fedoraproject.org/; echo "fedora rc=$?"'
