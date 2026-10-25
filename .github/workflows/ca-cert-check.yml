@@ -28,5 +28,6 @@ jobs:
           podman run --rm "$IMG" sh -c 'trust list | grep -ciE "emSign Root CS CA - G3" || true'
           podman run --rm "$IMG" sh -c 'curl -sS -o /dev/null --max-time 20 https://dv-g3b-emudhra.we-have-a-problem.com/; echo "emudhra rc=$?"'
           podman run --rm "$IMG" sh -c 'curl -sS -o /dev/null --max-time 20 https://fedoraproject.org/; echo "fedora rc=$?"'
-          podman run --rm "$IMG" sh -c 'command -v just ujust; ls /usr/share/ublue-os/just/ 2>&1 | head -40; ls /usr/share/ublue-os/justfile 2>&1'
-          podman run --rm "$IMG" sh -c 'for r in rebase-helper dx-group bbrew devmode update; do if grep -rqsE "^(alias +)?$r( |:)" /usr/share/ublue-os/just/ /usr/share/ublue-os/justfile; then echo "recipe $r=present"; else echo "recipe $r=absent"; fi; done'
+          podman run --rm "$IMG" sh -c 'command -v just ujust; ls /usr/share/ublue-os/just/ 2>&1 | head -40; true'
+          podman run --rm "$IMG" sh -c 'for r in rebase-helper dx-group bbrew devmode update; do if grep -rqsE "^(alias +)?$r( |:)" /usr/share/ublue-os/just/; then echo "recipe $r=present"; else echo "recipe $r=absent"; fi; done'
+          podman run --rm "$IMG" sh -c 'grep -rhoE "^(alias +)?[a-z][a-z0-9_-]*( +[^:=]*)?:( |$)" /usr/share/ublue-os/just/ | sed -E "s/^alias +//; s/[ :].*//" | sort -u | tr "\n" " "; echo'
