@@ -14,7 +14,8 @@ jobs:
           - ghcr.io/ublue-os/bluefin:stable
           - ghcr.io/ublue-os/bluefin-dx:stable
           - ghcr.io/ublue-os/bluefin-nvidia-open:stable
-          - ghcr.io/ublue-os/bluefin:stable-20261013
+          - ghcr.io/ublue-os/bluefin-dx-nvidia-open:stable
+          - ghcr.io/ublue-os/bluefin:stable-20261022
     steps:
       - name: Free disk
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL; df -h /
@@ -24,7 +25,10 @@ jobs:
         run: |
           set -x
           podman pull -q "$IMG" >/dev/null
+          podman image inspect "$IMG" --format '{{ index .Labels "org.opencontainers.image.version" }} {{ .Digest }}'
           podman run --rm "$IMG" rpm -q ca-certificates
-          podman run --rm "$IMG" sh -c 'trust list | grep -ciE "emSign ECC Root CA - G3|AAA Certificate Services" || true'
+          podman run --rm "$IMG" sh -c 'trust list | grep -iE "emSign" || echo "no emSign anchors"'
+          podman run --rm "$IMG" sh -c 'trust list | grep -ciE "emSign Root CS CA - G3" || true'
           podman run --rm "$IMG" sh -c 'curl -sS -o /dev/null --max-time 20 https://dv-g3b-emudhra.we-have-a-problem.com/; echo "emudhra rc=$?"'
           podman run --rm "$IMG" sh -c 'curl -sS -o /dev/null --max-time 20 https://fedoraproject.org/; echo "fedora rc=$?"'
+          podman run --rm "$IMG" sh -c 'for r in rebase-helper dx-group bbrew devmode update; do if just --justfile /usr/share/ublue-os/justfile --summary 2>/dev/null | tr " " "\n" | grep -qx "$r"; then echo "recipe $r=present"; else echo "recipe $r=absent"; fi; done'
